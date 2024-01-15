@@ -1,10 +1,10 @@
+import datetime
 import json
-from desktop_env.envs.desktop_env import DesktopEnv
-
 import logging
 import os
 import sys
-import datetime
+
+from desktop_env.envs.desktop_env import DesktopEnv
 
 #  Logger Configs {{{ # 
 logger = logging.getLogger()
@@ -12,17 +12,18 @@ logger.setLevel(logging.DEBUG)
 
 datetime_str: str = datetime.datetime.now().strftime("%Y%m%d@%H%M%S")
 
-file_handler = logging.FileHandler(os.path.join("logs", "normal-{:}.log".format(datetime_str)))
-debug_handler = logging.FileHandler(os.path.join("logs", "debug-{:}.log".format(datetime_str)))
+file_handler = logging.FileHandler(os.path.join("logs", "normal-{:}.log".format(datetime_str)), encoding="utf-8")
+debug_handler = logging.FileHandler(os.path.join("logs", "debug-{:}.log".format(datetime_str)), encoding="utf-8")
 stdout_handler = logging.StreamHandler(sys.stdout)
-sdebug_handler = logging.FileHandler(os.path.join("logs", "sdebug-{:}.log".format(datetime_str)))
+sdebug_handler = logging.FileHandler(os.path.join("logs", "sdebug-{:}.log".format(datetime_str)), encoding="utf-8")
 
 file_handler.setLevel(logging.INFO)
 debug_handler.setLevel(logging.DEBUG)
 stdout_handler.setLevel(logging.INFO)
 sdebug_handler.setLevel(logging.DEBUG)
 
-formatter = logging.Formatter(fmt="\x1b[1;33m[%(asctime)s \x1b[31m%(levelname)s \x1b[32m%(module)s/%(lineno)d-%(processName)s\x1b[1;33m] \x1b[0m%(message)s")
+formatter = logging.Formatter(
+    fmt="\x1b[1;33m[%(asctime)s \x1b[31m%(levelname)s \x1b[32m%(module)s/%(lineno)d-%(processName)s\x1b[1;33m] \x1b[0m%(message)s")
 file_handler.setFormatter(formatter)
 debug_handler.setFormatter(formatter)
 stdout_handler.setFormatter(formatter)
@@ -38,6 +39,7 @@ logger.addHandler(sdebug_handler)
 #  }}} Logger Configs # 
 
 logger = logging.getLogger("desktopenv.main")
+
 
 def human_agent():
     """
@@ -76,7 +78,8 @@ def human_agent():
         # }
         logger.info(trajectory[i])
 
-        observation, reward, done, info = env.step(trajectory[i], pause=5)
+        observation, reward, done, info = env.step(trajectory[i])
+        observation.pop("accessibility_tree")
         logger.info("Observation: %s", observation)
         logger.info("Reward: %.2f", reward)
         logger.info("Info: %s", info)
@@ -87,12 +90,14 @@ def human_agent():
             logger.info("The episode is done.")
             break
 
+    #input("PAUSING")
+
     result = env.evaluate()
     logger.info("Result: %.2f", result)
 
     #input("PAUSING")
 
-    #env.close()
+    # env.close()
     logger.info("Environment closed.")
 
 
