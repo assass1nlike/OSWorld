@@ -50,10 +50,49 @@
 		"thunderbird"
 	],
 	"evaluator": {
-		"func": "run_sqlite3",
+		"postconfig": [
+			{
+				"type": "download",
+				"parameters": {
+					"files": [
+						{
+							"url": "https://drive.usercontent.google.com/download?id=1abb7PPPRGGy3elpq2vTXe2aKTMOrbm7c&export=download&authuser=0&confirm=t&uuid=652a3d4c-278e-499c-bb26-58d0f70aa317&at=APZUnTXs_ZTZzOF3QrBa_rMjMr08:1705287009269",
+							"path": "/home/user/show-thunderbird-attachments.py"
+						}
+					]
+				}
+			},
+			{
+				"type": "execute",
+				"parameters": {
+					"command": ["pip", "install", "cssselect"]
+				}
+			},
+			{
+				"type": "execute",
+				"parameters": {
+					"command": [
+						"python",
+						"/home/user/show-thunderbird-attachments.py",
+						"New-month AWS Bill",
+						"aws-bill.pdf"
+					],
+					"stdout": "check-attachments.output"
+				}
+			}
+		],
+		"func": "check_list",
 		"result": {
+			"type": "cache_file",
+			"path": "check-attachments.output"
+		},
+		"expected": {
 			"type": "rule",
-			"rules": {}
+			"rules": {
+				"expect": [
+					"Attachment added!"
+				]
+			}
 		}
 	}
 }
