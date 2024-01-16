@@ -1,7 +1,8 @@
 import base64
 import json
 import re
-from typing import Dict
+import time
+from typing import Dict, List
 
 import requests
 
@@ -63,7 +64,8 @@ def parse_code_from_string(input_string):
 
 
 class GPT4v_Agent:
-    def __init__(self, api_key, model="gpt-4-vision-preview", max_tokens=300, action_space="computer_13"):
+    def __init__(self, api_key, instruction, model="gpt-4-vision-preview", max_tokens=300, action_space="computer_13"):
+        self.instruction = instruction
         self.model = model
         self.max_tokens = max_tokens
         self.action_space = action_space
@@ -80,15 +82,15 @@ class GPT4v_Agent:
                     {
                         "type": "text",
                         "text": {
-                            "computer_13": SYS_PROMPT_ACTION,
-                            "pyautogui": SYS_PROMPT_CODE
-                        }[action_space]
+                                    "computer_13": SYS_PROMPT_ACTION,
+                                    "pyautogui": SYS_PROMPT_CODE
+                                }[action_space] + "\nHere is the instruction for the task: {}".format(self.instruction)
                     },
                 ]
             }
         ]
 
-    def predict(self, obs: Dict):
+    def predict(self, obs: Dict) -> List:
         """
         Predict the next action(s) based on the current observation.
         """
@@ -98,8 +100,7 @@ class GPT4v_Agent:
             "content": [
                 {
                     "type": "text",
-                    "text": "To accomplish the task '{}' and given the current screenshot, what's the next step?".format(
-                        obs["instruction"])
+                    "text": "What's the next step that you will do to help with the task?"
                 },
                 {
                     "type": "image_url",
@@ -123,33 +124,32 @@ class GPT4v_Agent:
             "messages": self.trajectory,
             "max_tokens": self.max_tokens
         }
-        response = requests.post("https://api.openai.com/v1/chat/completions", headers=self.headers, json=payload)
 
+        while True:
+            try:
+                response = requests.post("https://api.openai.com/v1/chat/completions", headers=self.headers,
+                                         json=payload)
+                break
+            except:
+                print("Failed to generate response, retrying...")
+                time.sleep(5)
+                pass
         try:
             actions = self.parse_actions(response.json()['choices'][0]['message']['content'])
         except:
-            # todo: add error handling
-            print("Failed to parse action from response:", response.json()['choices'][0]['message']['content'])
+            print("Failed to parse action from response:", response.json())
             actions = None
 
         return actions
 
     def parse_actions(self, response: str):
-        # response example
-        """
-        ```json
-        {
-          "action_type": "CLICK",
-          "click_type": "RIGHT"
-        }
-        ```
-        """
-
         # parse from the response
         if self.action_space == "computer_13":
             actions = parse_actions_from_string(response)
         elif self.action_space == "pyautogui":
             actions = parse_code_from_string(response)
+        else:
+            raise ValueError("Invalid action space: " + self.action_space)
 
         # add action into the trajectory
         self.trajectory.append({
