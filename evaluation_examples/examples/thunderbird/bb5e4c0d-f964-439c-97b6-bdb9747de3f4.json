@@ -49,7 +49,7 @@
         "parameters": {
           "files": [
             {
-              "url": "https://raw.githubusercontent.com/unode/firefox_decrypt/main/firefox_decrypt.py",
+              "url": "https://raw.githubusercontent.com/unode/firefox_decrypt/3f1a6dce63056c1f64d845ff077fc1e653e757c6/firefox_decrypt.py",
               "path": "/home/user/firefox_decrypt.py"
             }
           ]
