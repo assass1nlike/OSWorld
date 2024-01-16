@@ -139,6 +139,8 @@ class GPT4v_Agent:
             actions = parse_actions_from_string(response)
         elif self.action_space == "pyautogui":
             actions = parse_code_from_string(response)
+        else:
+            raise ValueError("Invalid action space: " + self.action_space)
 
         # add action into the trajectory
         self.trajectory.append({
