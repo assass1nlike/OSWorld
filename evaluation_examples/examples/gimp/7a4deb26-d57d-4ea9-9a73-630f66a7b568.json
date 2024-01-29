@@ -1,7 +1,7 @@
 {
     "id": "7a4deb26-d57d-4ea9-9a73-630f66a7b568",
     "snapshot": "gimp",
-    "instruction": "Make my picture less bright, please.",
+    "instruction": "Could you tone down the brightness of my photo?",
     "source": "https://www.quora.com/How-do-I-edit-a-photo-in-GIMP",
     "config": [
         {
@@ -10,15 +10,18 @@
                 "files": [
                     {
                         "url": "https://drive.usercontent.google.com/download?id=1SIvX9Wimyw6i2UvnoLTNDHIObvDLAsIM&export=download&authuser=0&confirm=t&uuid=a48447ab-13a2-421f-9662-6ffff8f6f6d5&at=APZUnTVRxofs822XxgEv33WwYCkb:1705046264363",
-                        "path": "Desktop/woman_sitting_by_the_tree.png"
+                        "path": "~/Desktop/woman_sitting_by_the_tree.png"
                     }
                 ]
             }
         },
         {
-            "type": "open",
+            "type": "launch",
             "parameters": {
-                "path": "Desktop/woman_sitting_by_the_tree.png"
+                "command": [
+                    "gimp",
+                    "~/Desktop/woman_sitting_by_the_tree.png"
+                ]
             }
         }
     ],
@@ -27,15 +30,65 @@
         "gimp"
     ],
     "evaluator": {
-        "func": "decrease_brightness",
+        "postconfig": [
+			{
+				"type": "execute",
+				"parameters": {
+					"command": [
+						"python3",
+						"-c",
+						"import pyautogui; pyautogui.hotkey([\"shift\", \"ctrl\", \"e\"]);"
+					]
+				}
+			},
+			{
+				"type": "sleep",
+				"parameters": {
+					"seconds": 0.5
+				}
+			},
+            {
+				"type": "execute",
+				"parameters": {
+					"command": [
+						"python3",
+						"-c",
+						"import pyautogui; pyautogui.write(\"edited_darker\");pyautogui.press([\"enter\"]);"
+					]
+				}
+			},
+            {
+				"type": "sleep",
+				"parameters": {
+					"seconds": 2
+				}
+			},
+            {
+				"type": "execute",
+				"parameters": {
+					"command": [
+						"python3",
+						"-c",
+						"import pyautogui; pyautogui.press([\"enter\"]);"
+					]
+				}
+			},
+			{
+				"type": "sleep",
+				"parameters": {
+					"seconds": 5
+				}
+			}
+		],
+        "func": "check_brightness_decrease_and_structure_sim",
         "expected": {
             "type": "vm_file",
-            "path": "Desktop/woman_sitting_by_the_tree.png",
+            "path": "~/Desktop/woman_sitting_by_the_tree.png",
             "dest": "woman_sitting_by_the_tree.png"
         },
         "result": {
             "type": "vm_file",
-            "path": "Desktop/edited_darker.png",
+            "path": "~/Desktop/edited_darker.png",
             "dest": "edited_darker.png"
         }
     }
