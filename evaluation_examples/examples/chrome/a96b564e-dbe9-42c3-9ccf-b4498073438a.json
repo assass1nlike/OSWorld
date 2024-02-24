@@ -22,6 +22,30 @@
             "tcp:localhost:1337"
           ]
         }
+      },
+      {
+        "type": "chrome_open_tabs",
+        "parameters": {
+          "urls_to_open": [
+            "https://www.flightaware.com/"
+          ]
+        }
+      },
+      {
+        "type": "activate_window",
+        "parameters": {
+          "window_name": "Google Chrome"
+        }
+      },
+      {
+        "type": "execute",
+        "parameters": {
+          "command": [
+            "python",
+            "-c",
+            "import pyautogui; import time; pyautogui.hotkey('alt', 'f10'); time.sleep(0.5);"
+          ]
+        }
       }
     ],
     "trajectory": "trajectories/",
@@ -31,7 +55,11 @@
     "evaluator": {
         "func":"is_expected_active_tab",
         "result": {
-            "type": "active_tab_info"
+            "type": "active_tab_info",
+            "selectors":[
+              "application[name=Chromium] entry[name=Address\\ and\\ search\\ bar]"
+            ],
+            "goto_prefix": "https://www."
         },
         "expected":{
             "type": "rule",
