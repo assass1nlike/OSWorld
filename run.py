@@ -91,7 +91,7 @@ def config() -> argparse.Namespace:
     )
 
     # lm config
-    parser.add_argument("--model", type=str, default="gpt-4-0125-preview")
+    parser.add_argument("--model", type=str, default="gpt-4o")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--top_p", type=float, default=0.9)
     parser.add_argument("--max_tokens", type=int, default=1500)
@@ -150,6 +150,7 @@ def test(args: argparse.Namespace, test_all_meta: dict) -> None:
         action_space=agent.action_space,
         screen_size=(args.screen_width, args.screen_height),
         headless=args.headless,
+        os_type = "Ubuntu",
         require_a11y_tree=args.observation_type
         in ["a11y_tree", "screenshot_a11y_tree", "som"],
     )
