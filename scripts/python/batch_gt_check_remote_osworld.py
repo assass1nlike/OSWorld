@@ -46,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timeout", type=float, default=30.0)
     parser.add_argument("--task-timeout", type=int, default=900)
     parser.add_argument("--skip-type", action="append", default=[])
+    parser.add_argument("--desktop-dir", default=None, help="Override remote desktop/output directory")
     parser.add_argument("--limit", type=int, default=0, help="Run only first N tasks; 0 means all")
     return parser.parse_args()
 
@@ -99,6 +100,8 @@ def main() -> int:
         ]
         for typ in args.skip_type:
             cmd.extend(["--skip-type", typ])
+        if args.desktop_dir:
+            cmd.extend(["--desktop-dir", args.desktop_dir])
 
         print(f"[{index}/{len(tasks)}] {task_name}")
         started = time.time()

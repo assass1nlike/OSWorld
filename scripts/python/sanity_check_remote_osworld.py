@@ -248,7 +248,7 @@ def run_setup_steps(
 def infer_desktop_dir(task: dict[str, Any]) -> str:
     task_id = str(task.get("id", ""))
     if "-windows" in task_id:
-        return r"C:\Users\Administrator\Desktop"
+        return r"C:\Users\user\Desktop"
     if "-ubuntu" in task_id:
         return "/home/user/Desktop"
     raise SanityError(
