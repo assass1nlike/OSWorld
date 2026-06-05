@@ -1,188 +1,292 @@
+from __future__ import annotations
+
+import atexit
+import logging
 import os
 import time
-import logging
+from typing import Any
+
+import dotenv
+import requests
 import volcenginesdkcore
-import volcenginesdkautoscaling
 import volcenginesdkecs.models as ecs_models
+import volcenginesdkvpc.models as vpc_models
 from volcenginesdkcore.rest import ApiException
 from volcenginesdkecs.api import ECSApi
+from volcenginesdkvpc.api import VPCApi
 
 from desktop_env.providers.base import Provider
-from desktop_env.providers.volcengine.manager import _allocate_vm
+
+dotenv.load_dotenv()
 
 logger = logging.getLogger("desktopenv.providers.volcengine.VolcengineProvider")
 logger.setLevel(logging.INFO)
 
-WAIT_DELAY = 15
-MAX_ATTEMPTS = 10
+DEFAULT_SERVER_PORT = 5000
+DEFAULT_CHROMIUM_PORT = 9222
+DEFAULT_VNC_PORT = 5910
+DEFAULT_VLC_PORT = 8080
+
+
+def _truthy(value: str | None) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _env(name: str, default: str | None = None, *, required: bool = False) -> str | None:
+    value = os.getenv(name, default)
+    if required and not value:
+        raise EnvironmentError(f"{name} must be set for provider_name=volcengine")
+    return value
 
 
 class VolcengineProvider(Provider):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        self.region = os.getenv("VOLCENGINE_REGION", "eu-central-1")
+    """Volcengine ECS provider for DesktopEnv's per-task-image interface.
+
+    It creates one ECS instance from the resolved task image, waits for the
+    OSWorld server to become reachable, and returns the endpoint in the same
+    five-part format used by DesktopEnv.
+    """
+
+    def __init__(self, region: str = None, *, spec: str | None = None):
+        super().__init__(region or _env("VOLCENGINE_REGION", required=True))
+        self.spec = spec
         self.client = self._create_client()
+        self.vpc_client = self._create_vpc_client()
+
+        self.instance_id: str | None = None
+        self._image: str | None = None
+        self._headless: bool = False
+        self._os_type: str = ""
+        self._host: str | None = None
+
+        self.server_port = int(_env("VOLCENGINE_SERVER_PORT", str(DEFAULT_SERVER_PORT)))
+        self.chromium_port = int(_env("VOLCENGINE_CHROMIUM_PORT", str(DEFAULT_CHROMIUM_PORT)))
+        self.vnc_port = int(_env("VOLCENGINE_VNC_PORT", str(DEFAULT_VNC_PORT)))
+        self.vlc_port = int(_env("VOLCENGINE_VLC_PORT", str(DEFAULT_VLC_PORT)))
+        self.use_private_ip = _truthy(_env("VOLCENGINE_USE_PRIVATE_IP"))
+        self.wait_timeout = int(_env("VOLCENGINE_OSWORLD_READY_TIMEOUT", "900"))
+        self.wait_interval = int(_env("VOLCENGINE_OSWORLD_READY_INTERVAL", "10"))
+        atexit.register(self.stop_emulator)
 
     def _create_client(self) -> ECSApi:
         configuration = volcenginesdkcore.Configuration()
-        configuration.ak = os.getenv('VOLCENGINE_ACCESS_KEY_ID')
-        configuration.sk = os.getenv('VOLCENGINE_SECRET_ACCESS_KEY')
-        configuration.region = os.getenv('VOLCENGINE_REGION')
+        configuration.ak = _env("VOLCENGINE_ACCESS_KEY_ID", required=True)
+        configuration.sk = _env("VOLCENGINE_SECRET_ACCESS_KEY", required=True)
+        configuration.region = self.region
+        configuration.host = _env(
+            "VOLCENGINE_ECS_ENDPOINT",
+            f"ecs.{self.region}.volcengineapi.com",
+        )
         configuration.client_side_validation = True
-        # set default configuration
         volcenginesdkcore.Configuration.set_default(configuration)
         return ECSApi()
 
-    def start_emulator(self, path_to_vm: str, headless: bool, *args, **kwargs):
-        logger.info("Starting Volcengine VM...")
+    def _create_vpc_client(self) -> VPCApi:
+        configuration = volcenginesdkcore.Configuration()
+        configuration.ak = _env("VOLCENGINE_ACCESS_KEY_ID", required=True)
+        configuration.sk = _env("VOLCENGINE_SECRET_ACCESS_KEY", required=True)
+        configuration.region = self.region
+        configuration.host = _env(
+            "VOLCENGINE_VPC_ENDPOINT",
+            f"vpc.{self.region}.volcengineapi.com",
+        )
+        configuration.client_side_validation = True
+        volcenginesdkcore.Configuration.set_default(configuration)
+        return VPCApi()
+
+    def start_emulator(self, image: str, headless: bool, os_type: str) -> None:
+        logger.info("Starting Volcengine ECS image=%s os_type=%s", image, os_type)
+        self._image = image
+        self._headless = headless
+        self._os_type = os_type
+        self._host = None
 
         try:
-            # 检查实例状态
-            instance_info = self.client.describe_instances(ecs_models.DescribeInstancesRequest(
-                instance_ids=[path_to_vm]
-            ))
-            status = instance_info.instances[0].status
-            logger.info(f"Instance {path_to_vm} current status: {status}")
+            self.instance_id = self._run_instance(image)
+            self._wait_until_running(self.instance_id)
+            self._host = self._select_host(self.instance_id)
+            self._wait_osworld_server(self._host)
+            self._log_access(self.instance_id)
+        except Exception:
+            if self.instance_id:
+                try:
+                    self._delete_instance(self.instance_id)
+                except Exception as cleanup_error:
+                    logger.warning("Cleanup after Volcengine start failure failed: %s", cleanup_error)
+            self.instance_id = None
+            self._host = None
+            raise
 
-            if status == 'RUNNING':
-                logger.info(f"Instance {path_to_vm} is already running. Skipping start.")
+    def get_ip_address(self) -> str:
+        if not self.instance_id:
+            raise RuntimeError("get_ip_address called before start_emulator")
+        if not self._host:
+            self._host = self._select_host(self.instance_id)
+        return (
+            f"{self._host}:{self.server_port}:{self.chromium_port}:"
+            f"{self.vnc_port}:{self.vlc_port}"
+        )
+
+    def reset_to_clean(self) -> None:
+        if not self._image:
+            raise RuntimeError("reset_to_clean called before start_emulator")
+        image = self._image
+        headless = self._headless
+        os_type = self._os_type
+        self.stop_emulator()
+        self.start_emulator(image, headless, os_type)
+
+    def stop_emulator(self) -> None:
+        instance_id = self.instance_id
+        if not instance_id:
+            return
+        if _truthy(_env("VOLCENGINE_KEEP_INSTANCE_ON_STOP")):
+            logger.warning("VOLCENGINE_KEEP_INSTANCE_ON_STOP is set; leaving %s running", instance_id)
+            self.instance_id = None
+            self._host = None
+            return
+        self._delete_instance(instance_id)
+        self.instance_id = None
+        self._host = None
+
+    def _run_instance(self, image_id: str) -> str:
+        instance_type = _env("VOLCENGINE_INSTANCE_TYPE")
+        if not instance_type and self.spec and self.spec not in {"default", "g4il.2xlarge"}:
+            instance_type = self.spec
+        if not instance_type:
+            raise EnvironmentError(
+                "VOLCENGINE_INSTANCE_TYPE must be set for provider_name=volcengine "
+                "or pass --spec with a Volcengine ECS instance type."
+            )
+
+        subnet_id = _env("VOLCENGINE_SUBNET_ID", required=True)
+        security_group_id = _env("VOLCENGINE_SECURITY_GROUP_ID", required=True)
+        zone_id = _env("VOLCENGINE_ZONE_ID") or self._resolve_subnet_zone(subnet_id)
+        bandwidth = int(_env("VOLCENGINE_EIP_BANDWIDTH_MBPS", "5"))
+        volume_size = int(_env("VOLCENGINE_VOLUME_SIZE_GB", "30"))
+        volume_type = _env("VOLCENGINE_VOLUME_TYPE", "ESSD_PL0")
+        name_prefix = _env("VOLCENGINE_INSTANCE_NAME_PREFIX", "osworld")
+
+        kwargs: dict[str, Any] = {
+            "image_id": image_id,
+            "instance_type": instance_type,
+            "network_interfaces": [
+                ecs_models.NetworkInterfaceForRunInstancesInput(
+                    subnet_id=subnet_id,
+                    security_group_ids=[security_group_id],
+                )
+            ],
+            "eip_address": ecs_models.EipAddressForRunInstancesInput(
+                bandwidth_mbps=bandwidth,
+                charge_type=_env("VOLCENGINE_EIP_CHARGE_TYPE", "PayByTraffic"),
+            ),
+            "instance_name": f"{name_prefix}-{os.getpid()}-{int(time.time())}",
+            "volumes": [
+                ecs_models.VolumeForRunInstancesInput(
+                    volume_type=volume_type,
+                    size=volume_size,
+                )
+            ],
+            "zone_id": zone_id,
+            "description": "OSWorld evaluation instance",
+        }
+        password = _env("VOLCENGINE_DEFAULT_PASSWORD")
+        if password:
+            kwargs["password"] = password
+        key_pair_name = _env("VOLCENGINE_KEY_PAIR_NAME")
+        if key_pair_name:
+            kwargs["key_pair_name"] = key_pair_name
+
+        response = self.client.run_instances(ecs_models.RunInstancesRequest(**kwargs))
+        instance_ids = getattr(response, "instance_ids", None)
+        if not instance_ids:
+            raise RuntimeError(f"Volcengine run_instances returned no instance ids: {response!r}")
+        instance_id = instance_ids[0]
+        logger.info("Volcengine instance created: %s", instance_id)
+        return instance_id
+
+    def _resolve_subnet_zone(self, subnet_id: str) -> str:
+        response = self.vpc_client.describe_subnets(
+            vpc_models.DescribeSubnetsRequest(subnet_ids=[subnet_id])
+        )
+        subnets = getattr(response, "subnets", None) or []
+        if not subnets:
+            raise RuntimeError(f"Volcengine subnet not found: {subnet_id}")
+        zone_id = getattr(subnets[0], "zone_id", None)
+        if not zone_id:
+            raise RuntimeError(f"Volcengine subnet {subnet_id} has no zone_id")
+        logger.info("Resolved Volcengine subnet %s to zone %s", subnet_id, zone_id)
+        return zone_id
+
+    def _describe_instance(self, instance_id: str):
+        response = self.client.describe_instances(
+            ecs_models.DescribeInstancesRequest(instance_ids=[instance_id])
+        )
+        instances = getattr(response, "instances", None) or []
+        if not instances:
+            raise RuntimeError(f"Volcengine instance not found: {instance_id}")
+        return instances[0]
+
+    def _wait_until_running(self, instance_id: str) -> None:
+        deadline = time.time() + int(_env("VOLCENGINE_INSTANCE_READY_TIMEOUT", "600"))
+        while True:
+            instance = self._describe_instance(instance_id)
+            status = getattr(instance, "status", "")
+            logger.info("Volcengine instance %s status=%s", instance_id, status)
+            if status == "RUNNING":
                 return
+            if status in {"ERROR", "STOPPED"}:
+                raise RuntimeError(f"Volcengine instance {instance_id} entered status={status}")
+            if time.time() > deadline:
+                raise TimeoutError(f"Timed out waiting for Volcengine instance {instance_id} to run")
+            time.sleep(5)
 
-            if status == 'STOPPED':
-                # 启动实例
-                self.client.start_instance(ecs_models.StartInstancesRequest(instance_ids=[path_to_vm]))
-                logger.info(f"Instance {path_to_vm} is starting...")
+    def _select_host(self, instance_id: str) -> str:
+        instance = self._describe_instance(instance_id)
+        public_ip = getattr(getattr(instance, "eip_address", None), "ip_address", None)
+        private_ip = None
+        network_interfaces = getattr(instance, "network_interfaces", None) or []
+        if network_interfaces:
+            private_ip = getattr(network_interfaces[0], "primary_ip_address", None)
+        host = private_ip if self.use_private_ip else public_ip
+        if not host:
+            host = public_ip or private_ip
+        if not host:
+            raise RuntimeError(f"Volcengine instance {instance_id} has no usable IP address")
+        return host
 
-                # 等待实例运行
-                for attempt in range(MAX_ATTEMPTS):
-                    time.sleep(WAIT_DELAY)
-                    instance_info = self.client.describe_instances(ecs_models.DescribeInstancesRequest(
-                        instance_ids=[path_to_vm]
-                    ))
-                    status = instance_info.instances[0].status
-
-                    if status == 'RUNNING':
-                        logger.info(f"Instance {path_to_vm} is now running.")
-                        break
-                    elif status == 'ERROR':
-                        raise Exception(f"Instance {path_to_vm} failed to start")
-                    elif attempt == MAX_ATTEMPTS - 1:
-                        raise Exception(f"Instance {path_to_vm} failed to start within timeout")
-            else:
-                logger.warning(f"Instance {path_to_vm} is in status '{status}' and cannot be started.")
-
-        except ApiException as e:
-            logger.error(f"Failed to start the Volcengine VM {path_to_vm}: {str(e)}")
-            raise
-
-    def get_ip_address(self, path_to_vm: str) -> str:
-        logger.info("Getting Volcengine VM IP address...")
-
-        try:
-            instance_info = self.client.describe_instances(ecs_models.DescribeInstancesRequest(
-                instance_ids=[path_to_vm]
-            ))
-
-            public_ip = instance_info.instances[0].eip_address.ip_address
-            private_ip = instance_info.instances[0].network_interfaces[0].primary_ip_address
-
-            if public_ip:
-                vnc_url = f"http://{public_ip}:5910/vnc.html"
-                logger.info("=" * 80)
-                logger.info(f"🖥️  VNC Web Access URL: {vnc_url}")
-                logger.info(f"📡 Public IP: {public_ip}")
-                logger.info(f"🏠 Private IP: {private_ip}")
-                logger.info("=" * 80)
-                print(f"\n🌐 VNC Web Access URL: {vnc_url}")
-                print(f"📍 Please open the above address in the browser for remote desktop access\n")
-            else:
-                logger.warning("No public IP address available for VNC access")
-
-            return private_ip
-
-        except ApiException as e:
-            logger.error(f"Failed to retrieve IP address for the instance {path_to_vm}: {str(e)}")
-            raise
-
-    def save_state(self, path_to_vm: str, snapshot_name: str):
-        logger.info("Saving Volcengine VM state...")
-
-        try:
-            # 创建镜像
-            response = self.client.create_image(ecs_models.CreateImageRequest(
-                snapshot_id=snapshot_name,
-                instance_id=path_to_vm,
-                description=f"OSWorld snapshot: {snapshot_name}"
-            ))
-            image_id = response['image_id']
-            logger.info(f"Image {image_id} created successfully from instance {path_to_vm}.")
-            return image_id
-        except ApiException as e:
-            logger.error(f"Failed to create image from the instance {path_to_vm}: {str(e)}")
-            raise
-
-    def revert_to_snapshot(self, path_to_vm: str, snapshot_name: str):
-        logger.info(f"Reverting Volcengine VM to snapshot: {snapshot_name}...")
-
-        try:
-            # 删除原实例
-            self.client.delete_instance(ecs_models.DeleteInstanceRequest(
-                instance_id=path_to_vm,
-            ))
-            logger.info(f"Old instance {path_to_vm} has been deleted.")
-
-            # 创建实例
-            new_instance_id = _allocate_vm()
-
-            logger.info(f"New instance {new_instance_id} launched from image {snapshot_name}.")
-            logger.info(f"Waiting for instance {new_instance_id} to be running...")
-
-            # 等待新实例运行
-            while True:
-                instance_info = self.client.describe_instances(ecs_models.DescribeInstancesRequest(
-                    instance_ids=[new_instance_id]
-                ))
-                status = instance_info.instances[0].status
-                if status == 'RUNNING':
-                    break
-                elif status in ['STOPPED', 'ERROR']:
-                    raise Exception(f"New instance {new_instance_id} failed to start, status: {status}")
-                time.sleep(5)
-
-            logger.info(f"Instance {new_instance_id} is ready.")
-
-            # 获取新实例的IP地址
+    def _wait_osworld_server(self, host: str) -> None:
+        url = f"http://{host}:{self.server_port}/platform"
+        deadline = time.time() + self.wait_timeout
+        last_error: Exception | None = None
+        while time.time() <= deadline:
             try:
-                instance_info = self.client.describe_instances(ecs_models.DescribeInstancesRequest(
-                    instance_ids=[new_instance_id]
-                ))
-                public_ip = instance_info.instances[0].eip_address.ip_address
-                if public_ip:
-                    vnc_url = f"http://{public_ip}:5910/vnc.html"
-                    logger.info("=" * 80)
-                    logger.info(f"🖥️  New Instance VNC Web Access URL: {vnc_url}")
-                    logger.info(f"📡 Public IP: {public_ip}")
-                    logger.info(f"🆔 New Instance ID: {new_instance_id}")
-                    logger.info("=" * 80)
-                    print(f"\n🌐 New Instance VNC Web Access URL: {vnc_url}")
-                    print(f"📍 Please open the above address in the browser for remote desktop access\n")
-            except Exception as e:
-                logger.warning(f"Failed to get VNC address for new instance {new_instance_id}: {e}")
+                response = requests.get(url, timeout=5)
+                if 200 <= response.status_code < 300:
+                    logger.info("OSWorld server is ready: %s -> %s", url, response.text.strip())
+                    return
+                last_error = RuntimeError(f"HTTP {response.status_code}: {response.text[:200]}")
+            except Exception as error:
+                last_error = error
+            time.sleep(self.wait_interval)
+        raise TimeoutError(f"Timed out waiting for OSWorld server at {url}: {last_error}")
 
-            return new_instance_id
+    def _log_access(self, instance_id: str) -> None:
+        instance = self._describe_instance(instance_id)
+        public_ip = getattr(getattr(instance, "eip_address", None), "ip_address", None)
+        private_ip = None
+        network_interfaces = getattr(instance, "network_interfaces", None) or []
+        if network_interfaces:
+            private_ip = getattr(network_interfaces[0], "primary_ip_address", None)
+        if public_ip:
+            logger.info("Volcengine noVNC URL: http://%s:%s/vnc.html", public_ip, self.vnc_port)
+            print(f"\nVolcengine noVNC URL: http://{public_ip}:{self.vnc_port}/vnc.html")
+        logger.info("Volcengine instance=%s public_ip=%s private_ip=%s", instance_id, public_ip, private_ip)
 
-        except ApiException as e:
-            logger.error(f"Failed to revert to snapshot {snapshot_name} for the instance {path_to_vm}: {str(e)}")
-            raise
-
-    def stop_emulator(self, path_to_vm, region=None):
-        logger.info(f"Stopping Volcengine VM {path_to_vm}...")
-
+    def _delete_instance(self, instance_id: str) -> None:
+        logger.info("Deleting Volcengine instance %s", instance_id)
         try:
-            self.client.delete_instance(ecs_models.DeleteInstanceRequest(
-                instance_id=path_to_vm,
-            ))
-            logger.info(f"Instance {path_to_vm} has been terminated.")
-        except ApiException as e:
-            logger.error(f"Failed to stop the Volcengine VM {path_to_vm}: {str(e)}")
+            self.client.delete_instance(ecs_models.DeleteInstanceRequest(instance_id=instance_id))
+        except ApiException as error:
+            logger.error("Failed to delete Volcengine instance %s: %s", instance_id, error)
             raise

@@ -7,7 +7,7 @@ Engiworld tasks live at::
 Asset paths inside each task spec (``upload_file.parameters.files[].local_path``)
 are relative to the ``<domain>`` directory and are absolutised at load time.
 
-Per-task ``snapshot`` is consumed by the ``msh_sandbox`` provider; no global AWS
+Per-task ``snapshot`` is consumed by the configured provider; no global AWS
 image lookup happens here. Task ids must end with ``-ubuntu`` or ``-windows``;
 each worker resolves the OS per task and rebuilds its agent accordingly, so a
 single eval list can mix Ubuntu and Windows tasks freely.
@@ -29,10 +29,20 @@ import time
 from multiprocessing import Manager, Process, current_process
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from lib_results_logger import ACTION_KINDS, log_task_error, reconcile_results_from_disk
+import dotenv
+
+from lib_results_logger import (
+    ACTION_KINDS,
+    _model_results_dir,
+    log_task_error,
+    reconcile_results_from_disk,
+)
 from mm_agents._rate_limit import RpmManager, set_active_limiter
 
-SUPPORTED_PROVIDER = "msh-sandbox"
+dotenv.load_dotenv()
+
+SUPPORTED_PROVIDERS = ("msh-sandbox", "volcengine")
+DEFAULT_PROVIDER = "msh-sandbox"
 SUPPORTED_OS_TYPES = ("Ubuntu", "Windows")
 
 
@@ -75,8 +85,8 @@ def add_common_engiworld_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--provider_name", type=str,
-        default=SUPPORTED_PROVIDER, choices=[SUPPORTED_PROVIDER],
-        help="VM provider；engiworld 只适配 msh_sandbox，写其它值 argparse 会直接拒",
+        default=DEFAULT_PROVIDER, choices=list(SUPPORTED_PROVIDERS),
+        help="VM provider. Use msh-sandbox for the company sandbox or volcengine for Volcengine ECS.",
     )
     parser.add_argument(
         "--spec", type=str, default="g4il.2xlarge",
@@ -98,7 +108,7 @@ def add_common_engiworld_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--result_dir", type=str, default="./results",
         help="结果输出根目录；最终路径 "
-             "<result_dir>/<action_space>/<observation_type>/<model>/<domain>/<task-id>/",
+             "<result_dir>/<eval_mode>/<model>/<domain>/<task-id>/",
     )
     parser.add_argument(
         "--num_envs", type=int, default=1,
@@ -143,15 +153,26 @@ def add_common_engiworld_args(parser: argparse.ArgumentParser) -> None:
              "和 server 端账号配额计数一致（含被拒绝的请求）",
     )
     parser.add_argument(
-        "--terminal_bash_timeout", type=int, default=30,
-        help="terminal 模式下单个 ```bash``` 块在 VM 上的超时秒数；超时由 server 侧 kill。"
-             "CAD/FEM/编译类任务建议调高到 120+。仅在 observation_type=terminal 时生效",
+        "--bash_timeout", type=int, default=30,
+        help="单个 ```bash``` 块（typed-action <action type=\"bash\"> 或 terminal obs 的 bash action）"
+             "在 VM 上的超时秒数；超时由 server 侧 kill 并抛 SandboxExecuteHardTimeoutError。"
+             "CAD/FEM/编译类任务建议调高到 120+。pyautogui / python action 的 30s 上限在服务端写死，"
+             "无法通过本参数调整。",
     )
     parser.add_argument(
         "--record_video", action="store_true",
         help="录制 VM 屏幕视频到 <result_dir>/.../recording.mp4。默认关闭——单个录制约 800MB-1GB，"
              "1000+ task 批量评测会产生 1TB 量级的产物，使后续 hf upload 哈希阶段极慢。"
              "需要做事故复盘 / 演示 / 标注时再打开。",
+    )
+    parser.add_argument(
+        "--resume", action="store_true",
+        help="开启后，崩溃后重跑会从 traj.jsonl 的最后一步回放：先在干净 sandbox 上重放已记录的"
+             "action（GUI/CLI 每步统一 sleep 60s 让 UI 稳定），把 VM 推到中断状态，再让 agent "
+             "从下一步推理。不传则维持旧行为（半成品目录整个清空、从 step 0 重跑）。"
+             "traj.jsonl 损坏无法解析时自动降级为任务级重跑（记 WARNING）。"
+             "前提：msh_sandbox 每次启动状态完全 deterministic（含鼠标位置、UI 初始 layout），"
+             "否则 PyAutoGUI 绝对坐标会漂。",
     )
 
 
@@ -160,8 +181,7 @@ def setup_logging(args: argparse.Namespace, label: str) -> logging.Logger:
     root.setLevel(getattr(logging, args.log_level.upper()))
     log_dir = os.path.join(
         args.result_dir,
-        args.action_space,
-        args.observation_type,
+        args.eval_mode,
         args.model,
         "logs",
     )
@@ -202,12 +222,16 @@ def setup_logging(args: argparse.Namespace, label: str) -> logging.Logger:
 # ---------- task loading -----------------------------------------------
 
 
-def require_msh_sandbox(provider_name: str) -> None:
-    if provider_name != SUPPORTED_PROVIDER:
+def require_supported_provider(provider_name: str) -> None:
+    if provider_name not in SUPPORTED_PROVIDERS:
         raise NotImplementedError(
-            f"engiworld launchers only support provider_name={SUPPORTED_PROVIDER!r}; "
+            f"engiworld launchers only support provider_name in {SUPPORTED_PROVIDERS!r}; "
             f"got {provider_name!r}. Other providers are not adapted."
         )
+
+
+def require_msh_sandbox(provider_name: str) -> None:
+    require_supported_provider(provider_name)
 
 
 def load_engiworld_task(base_dir: str, domain: str, example_id: str) -> Dict[str, Any]:
@@ -259,16 +283,15 @@ def derive_engiworld_os_type(task_config: Dict[str, Any]) -> str:
 
 
 def build_engiworld_env(args: argparse.Namespace):
-    require_msh_sandbox(args.provider_name)
+    require_supported_provider(args.provider_name)
     from desktop_env.desktop_env import DesktopEnv
 
     return DesktopEnv(
-        action_space=args.action_space,
+        action_space="pyautogui",
         provider_name=args.provider_name,
         screen_size=(args.screen_width, args.screen_height),
         headless=args.headless,
-        require_a11y_tree=args.observation_type
-        in ("a11y_tree", "screenshot_a11y_tree", "som"),
+        require_a11y_tree=False,
         enable_proxy=False,
         client_password=args.client_password,
         spec=getattr(args, "spec", None),
@@ -278,13 +301,21 @@ def build_engiworld_env(args: argparse.Namespace):
 def filter_unfinished(
     meta: Dict[str, List[str]], args: argparse.Namespace
 ) -> Dict[str, List[str]]:
-    """Drop example_ids whose result.txt already exists, purge half-finished dirs."""
+    """Drop example_ids whose result.txt already exists.
+
+    Half-finished dirs (no result.txt) are handled per ``args.resume``:
+    - resume + traj.jsonl present: keep the dir intact so run_single can
+      replay recorded actions and continue inference from where it stopped.
+    - else (no resume, or no traj.jsonl to replay from): purge the dir so
+      the task starts from step 0 — preserves the legacy behavior.
+    """
     target_dir = os.path.join(
-        args.result_dir, args.action_space, args.observation_type, args.model
+        args.result_dir, args.eval_mode, args.model
     )
     if not os.path.isdir(target_dir):
         return {d: list(ids) for d, ids in meta.items()}
     finished: Dict[str, set] = {d: set() for d in meta}
+    resume_mode = bool(getattr(args, "resume", False))
     for d in meta:
         d_path = os.path.join(target_dir, d)
         if not os.path.isdir(d_path):
@@ -296,9 +327,14 @@ def filter_unfinished(
             entries = os.listdir(ex_path)
             if "result.txt" in entries:
                 finished[d].add(ex)
-            else:
-                for f in entries:
-                    os.remove(os.path.join(ex_path, f))
+                continue
+            if resume_mode and "traj.jsonl" in entries:
+                # Leave the half-finished dir intact; run_single will detect
+                # traj.jsonl and enter replay. If traj.jsonl turns out to be
+                # corrupt, the runner falls back to purging + fresh run.
+                continue
+            for f in entries:
+                os.remove(os.path.join(ex_path, f))
     return {d: [ex for ex in ids if ex not in finished[d]] for d, ids in meta.items()}
 
 
@@ -349,8 +385,7 @@ def _worker(
                 )
                 example_result_dir = os.path.join(
                     args.result_dir,
-                    args.action_space,
-                    args.observation_type,
+                    args.eval_mode,
                     args.model,
                     domain,
                     example_id,
@@ -406,8 +441,7 @@ def _worker(
                 logger.error(traceback.format_exc())
                 stub_result_dir = os.path.join(
                     args.result_dir,
-                    args.action_space,
-                    args.observation_type,
+                    args.eval_mode,
                     args.model,
                     domain,
                     example_id,
@@ -479,13 +513,7 @@ def _print_summary(args: argparse.Namespace, logger: logging.Logger) -> None:
     from rich.console import Console
     from rich.table import Table
 
-    results_path = os.path.join(
-        args.result_dir,
-        args.action_space,
-        args.observation_type,
-        args.model,
-        "results.json",
-    )
+    results_path = str(_model_results_dir(args) / "results.json")
     if not os.path.isfile(results_path):
         logger.info("No results.json at %s", results_path)
         return
@@ -741,7 +769,7 @@ def run_eval_pool(
 ) -> None:
     """Top-level entry. Reads meta, spawns workers; per-task os_type is derived
     inside each worker from the task id suffix."""
-    require_msh_sandbox(args.provider_name)
+    require_supported_provider(args.provider_name)
 
     if not os.path.isdir(args.test_config_base_dir):
         raise FileNotFoundError(
@@ -763,8 +791,7 @@ def run_eval_pool(
 
     args_dump = os.path.join(
         args.result_dir,
-        args.action_space,
-        args.observation_type,
+        args.eval_mode,
         args.model,
         "args.json",
     )
@@ -892,12 +919,14 @@ def run_eval_pool(
 
 __all__ = [
     "SUPPORTED_OS_TYPES",
-    "SUPPORTED_PROVIDER",
+    "SUPPORTED_PROVIDERS",
+    "DEFAULT_PROVIDER",
     "add_common_engiworld_args",
     "build_engiworld_env",
     "derive_engiworld_os_type",
     "filter_unfinished",
     "load_engiworld_task",
+    "require_supported_provider",
     "require_msh_sandbox",
     "run_eval_pool",
     "setup_logging",

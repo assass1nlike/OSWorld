@@ -1,221 +1,93 @@
+from __future__ import annotations
+
+import json
 import os
-import logging
-import signal
+import re
+from pathlib import Path
+from typing import Any
+
 import dotenv
-import time
-import volcenginesdkcore
-import volcenginesdkecs.models as ecs_models
-from volcenginesdkecs.api import ECSApi
 
 from desktop_env.providers.base import VMManager
 
-# Load environment variables from .env file
 dotenv.load_dotenv()
 
-for env_name in [
-    "VOLCENGINE_ACCESS_KEY_ID",
-    "VOLCENGINE_SECRET_ACCESS_KEY",
-    "VOLCENGINE_REGION",
-    "VOLCENGINE_SUBNET_ID",
-    "VOLCENGINE_SECURITY_GROUP_ID",
-    "VOLCENGINE_INSTANCE_TYPE",
-    "VOLCENGINE_IMAGE_ID",
-    "VOLCENGINE_ZONE_ID",
-    "VOLCENGINE_DEFAULT_PASSWORD",
-]:
-    if not os.getenv(env_name):
-        raise EnvironmentError(f"{env_name} must be set in the environment variables.")
 
-logger = logging.getLogger("desktopenv.providers.volcengine.VolcengineVMManager")
-logger.setLevel(logging.INFO)
+def _snapshot_env_suffix(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", value).strip("_").upper()
 
-VOLCENGINE_ACCESS_KEY_ID = os.getenv("VOLCENGINE_ACCESS_KEY_ID")
-VOLCENGINE_SECRET_ACCESS_KEY = os.getenv("VOLCENGINE_SECRET_ACCESS_KEY")
-VOLCENGINE_REGION = os.getenv("VOLCENGINE_REGION")
-VOLCENGINE_SUBNET_ID = os.getenv("VOLCENGINE_SUBNET_ID")
-VOLCENGINE_SECURITY_GROUP_ID = os.getenv("VOLCENGINE_SECURITY_GROUP_ID")
-VOLCENGINE_INSTANCE_TYPE = os.getenv("VOLCENGINE_INSTANCE_TYPE")
-VOLCENGINE_IMAGE_ID = os.getenv("VOLCENGINE_IMAGE_ID")
-VOLCENGINE_ZONE_ID = os.getenv("VOLCENGINE_ZONE_ID")
-VOLCENGINE_DEFAULT_PASSWORD = os.getenv("VOLCENGINE_DEFAULT_PASSWORD")
 
-def _allocate_vm(screen_size=(1920, 1080)):
-    """分配火山引擎虚拟机"""
+def _load_image_map() -> dict[str, Any]:
+    raw = os.getenv("VOLCENGINE_IMAGE_ID_MAP") or os.getenv("VOLCENGINE_IMAGE_ID_MAP_JSON")
+    if not raw:
+        return {}
 
-    # 初始化火山引擎客户端
-    configuration = volcenginesdkcore.Configuration()
-    configuration.region = VOLCENGINE_REGION
-    configuration.ak = VOLCENGINE_ACCESS_KEY_ID
-    configuration.sk = VOLCENGINE_SECRET_ACCESS_KEY
-    configuration.client_side_validation = True
-    # set default configuration
-    volcenginesdkcore.Configuration.set_default(configuration)
-
-    # use global default configuration
-    api_instance = ECSApi()
-    
-    instance_id = None
-    original_sigint_handler = signal.getsignal(signal.SIGINT)
-    original_sigterm_handler = signal.getsignal(signal.SIGTERM)
-    
-    def signal_handler(sig, frame):
-        if instance_id:
-            signal_name = "SIGINT" if sig == signal.SIGINT else "SIGTERM"
-            logger.warning(f"Received {signal_name} signal, terminating instance {instance_id}...")
-            try:
-                api_instance.delete_instance(ecs_models.DeleteInstanceRequest(
-                    instance_id=instance_id,
-                ))
-                logger.info(f"Successfully terminated instance {instance_id} after {signal_name}.")
-            except Exception as cleanup_error:
-                logger.error(f"Failed to terminate instance {instance_id} after {signal_name}: {str(cleanup_error)}")
-        
-        # Restore original signal handlers
-        signal.signal(signal.SIGINT, original_sigint_handler)
-        signal.signal(signal.SIGTERM, original_sigterm_handler)
-        
-        if sig == signal.SIGINT:
-            raise KeyboardInterrupt
+    if raw.lstrip().startswith("{"):
+        text = raw
+    else:
+        possible_path = Path(raw)
+        if possible_path.exists():
+            text = possible_path.read_text(encoding="utf-8")
         else:
-            import sys
-            sys.exit(0)
-    
-    try:
-        # Set up signal handlers
-        signal.signal(signal.SIGINT, signal_handler)
-        signal.signal(signal.SIGTERM, signal_handler)
-        
-        # 创建实例参数
-        create_instance_params = ecs_models.RunInstancesRequest(
-            image_id = VOLCENGINE_IMAGE_ID,
-            instance_type = VOLCENGINE_INSTANCE_TYPE,
-            network_interfaces=[ecs_models.NetworkInterfaceForRunInstancesInput(
-                subnet_id=VOLCENGINE_SUBNET_ID,
-                security_group_ids=[VOLCENGINE_SECURITY_GROUP_ID],
-            )],
-            eip_address=ecs_models.EipAddressForRunInstancesInput(
-                bandwidth_mbps = 5,
-                charge_type = "PayByTraffic",
-            ),
-            instance_name = f"osworld-{os.getpid()}-{int(time.time())}",
-            volumes=[ecs_models.VolumeForRunInstancesInput(
-                volume_type="ESSD_PL0",
-                size=30,
-            )],
-            zone_id=VOLCENGINE_ZONE_ID,
-            password = VOLCENGINE_DEFAULT_PASSWORD,  # 默认密码
-            description = "OSWorld evaluation instance"
-        )
-        
-        # 创建实例
-        response = api_instance.run_instances(create_instance_params)
-        instance_id = response.instance_ids[0]
-        
-        logger.info(f"Waiting for instance {instance_id} to be running...")
-        
-        # 等待实例运行
-        while True:
-            instance_info = api_instance.describe_instances(ecs_models.DescribeInstancesRequest(
-                instance_ids=[instance_id]
-            ))
-            status = instance_info.instances[0].status
-            if status == 'RUNNING':
-                break
-            elif status in ['STOPPED', 'ERROR']:
-                raise Exception(f"Instance {instance_id} failed to start, status: {status}")
-            time.sleep(5)
-        
-        logger.info(f"Instance {instance_id} is ready.")
-        
-        # 获取实例IP地址
-        try:
-            instance_info = api_instance.describe_instances(ecs_models.DescribeInstancesRequest(
-                instance_ids=[instance_id]
-            ))
-            print(instance_info)
-            public_ip = instance_info.instances[0].eip_address.ip_address
-            private_ip = instance_info.instances[0].network_interfaces[0].primary_ip_address
-            
-            if public_ip:
-                vnc_url = f"http://{public_ip}:5910/vnc.html"
-                logger.info("="*80)
-                logger.info(f"🖥️  VNC Web Access URL: {vnc_url}")
-                logger.info(f"📡 Public IP: {public_ip}")
-                logger.info(f"🏠 Private IP: {private_ip}")
-                logger.info(f"🆔 Instance ID: {instance_id}")
-                logger.info("="*80)
-                print(f"\n🌐 VNC Web Access URL: {vnc_url}")
-                print(f"📍 Please open the above address in the browser for remote desktop access\n")
-        except Exception as e:
-            logger.warning(f"Failed to get VNC address for instance {instance_id}: {e}")
-            
-    except KeyboardInterrupt:
-        logger.warning("VM allocation interrupted by user (SIGINT).")
-        if instance_id:
-            logger.info(f"Terminating instance {instance_id} due to interruption.")
-            api_instance.delete_instance(ecs_models.DeleteInstanceRequest(
-                instance_id=instance_id,
-            ))
-        raise
-    except Exception as e:
-        logger.error(f"Failed to allocate VM: {e}", exc_info=True)
-        if instance_id:
-            logger.info(f"Terminating instance {instance_id} due to an error.")
-            api_instance.delete_instance(ecs_models.DeleteInstanceRequest(
-                instance_id=instance_id,
-            ))
-        raise
-    finally:
-        # Restore original signal handlers
-        signal.signal(signal.SIGINT, original_sigint_handler)
-        signal.signal(signal.SIGTERM, original_sigterm_handler)
+            text = raw
 
-    return instance_id
+    data = json.loads(text)
+    if not isinstance(data, dict):
+        raise ValueError("VOLCENGINE_IMAGE_ID_MAP must be a JSON object or a path to one")
+    return data
 
 
 class VolcengineVMManager(VMManager):
+    """Resolve Engiworld task snapshots to Volcengine ECS image ids.
+
+    Supported resolution order:
+      1. snapshot already looks explicit: image-xxx, image:xxx, or volcengine:xxx
+      2. VOLCENGINE_IMAGE_ID_MAP JSON, with either {"snapshot": "image-xxx"} or
+         {"Windows": {"snapshot": "image-xxx"}, "Ubuntu": {...}}
+      3. per-snapshot env var, e.g. VOLCENGINE_IMAGE_ID_EAGLE_7_7_0=image-xxx
+      4. VOLCENGINE_IMAGE_ID fallback for single-image experiments
     """
-    Volcengine VM Manager for managing virtual machines on Volcengine.
-    
-    Volcengine does not need to maintain a registry of VMs, as it can dynamically allocate and deallocate VMs.
-    """
-    def __init__(self, **kwargs):
-        self.initialize_registry()
 
-    def initialize_registry(self, **kwargs):
-        pass
+    def resolve_image(self, snapshot: str, os_type: str, **kwargs) -> str:
+        snapshot = str(snapshot)
+        os_type = str(os_type or "")
 
-    def add_vm(self, vm_path, lock_needed=True, **kwargs):
-        pass
+        for prefix in ("image:", "volcengine:"):
+            if snapshot.startswith(prefix):
+                return snapshot[len(prefix):]
+        if snapshot.startswith("image-"):
+            return snapshot
 
-    def _add_vm(self, vm_path):
-        pass
+        image_map = _load_image_map()
+        for os_key in (os_type, os_type.lower(), os_type.upper()):
+            nested = image_map.get(os_key)
+            if isinstance(nested, dict) and snapshot in nested:
+                return str(nested[snapshot])
 
-    def delete_vm(self, vm_path, lock_needed=True, **kwargs):
-        pass
+        for key in (
+            snapshot,
+            f"{os_type}:{snapshot}",
+            f"{os_type.lower()}:{snapshot}" if os_type else "",
+        ):
+            if key and key in image_map:
+                return str(image_map[key])
 
-    def _delete_vm(self, vm_path):
-        pass
+        suffixes = [
+            _snapshot_env_suffix(snapshot),
+            _snapshot_env_suffix(f"{os_type}_{snapshot}") if os_type else "",
+        ]
+        for suffix in suffixes:
+            if not suffix:
+                continue
+            value = os.getenv(f"VOLCENGINE_IMAGE_ID_{suffix}")
+            if value:
+                return value
 
-    def occupy_vm(self, vm_path, pid, lock_needed=True, **kwargs):
-        pass
+        fallback = os.getenv("VOLCENGINE_IMAGE_ID")
+        if fallback:
+            return fallback
 
-    def _occupy_vm(self, vm_path, pid):
-        pass
-
-    def check_and_clean(self, lock_needed=True, **kwargs):
-        pass
-
-    def _check_and_clean(self):
-        pass
-
-    def list_free_vms(self, lock_needed=True, **kwargs):
-        pass
-
-    def _list_free_vms(self):
-        pass
-
-    def get_vm_path(self, screen_size=(1920, 1080), **kwargs):
-        logger.info("Allocating a new VM in region: {region}".format(region=VOLCENGINE_REGION))
-        new_vm_path = _allocate_vm(screen_size=screen_size)
-        return new_vm_path
+        raise EnvironmentError(
+            f"Cannot resolve Volcengine image id for snapshot={snapshot!r}, os_type={os_type!r}. "
+            "Set VOLCENGINE_IMAGE_ID_MAP, VOLCENGINE_IMAGE_ID_<SNAPSHOT>, or VOLCENGINE_IMAGE_ID."
+        )

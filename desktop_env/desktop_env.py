@@ -124,7 +124,9 @@ class DesktopEnv(gym.Env):
             os_type (str): operating system type, used as a hint for image resolution
             enable_proxy (bool): whether to enable proxy support
             client_password (str): VM user password (defaults to "password")
-            spec (str): sandbox session spec name (msh-sandbox only; None = provider default)
+            spec (str): provider-specific resource spec. For msh-sandbox this is the
+                sandbox session spec; for volcengine it may be used as the ECS
+                instance type when VOLCENGINE_INSTANCE_TYPE is not set.
         """
         assert action_space in ["computer_13", "pyautogui", "claude_computer_use", "autoglm_computer_use", "cli+readimg"]
 
@@ -342,7 +344,7 @@ class DesktopEnv(gym.Env):
                 or (len(self.metric) == len(self.result_getter) == len(self.expected_getter) == len(
                     self.metric_options)))
 
-    def step(self, action, pause=2):
+    def step(self, action, pause=2, bash_timeout=30):
         self._step_no += 1
         self.action_history.append(action)
 
@@ -350,6 +352,27 @@ class DesktopEnv(gym.Env):
         done = False  # todo: Define episode termination condition for each example
         info = {}
         logger.info(f"Step {self._step_no} in trajectory {self._traj_no} with action: {action}")
+
+        # PromptAgent typed-action protocol: action is (kind, payload).
+        if isinstance(action, tuple) and len(action) == 2 and isinstance(action[0], str):
+            kind, payload = action
+            if kind == "WAIT":
+                time.sleep(pause)
+            elif kind == "FAIL":
+                done = True
+                info = {"fail": True}
+            elif kind == "DONE":
+                done = True
+                info = {"done": True}
+            elif kind in ("pyautogui", "python"):
+                self.controller.execute_python_command(_fix_pyautogui_less_than_bug(payload))
+            elif kind == "bash":
+                self.controller.run_bash_script(payload, timeout=bash_timeout)
+            else:
+                raise ValueError(f"Unknown typed-action kind: {kind!r}")
+            time.sleep(pause)
+            return self._get_obs(), reward, done, info
+
         # handle the special actions
         if action in ['WAIT', 'FAIL', 'DONE'] or (type(action) == dict and action['action_type'] in ['WAIT', 'FAIL', 'DONE']):
             if action == 'WAIT' or (type(action) == dict and action.get('action_type') == 'WAIT'):

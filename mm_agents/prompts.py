@@ -1,3 +1,96 @@
+def _engiworld_join_prompt_sections(*sections):
+    return "\n\n".join(section for section in sections if section).strip()
+
+
+def build_gui_prompt() -> str:
+    """System prompt for Engiworld eval-mode=gui."""
+    envelope = (
+        "Return exactly one XML document each time. Do not use Markdown code "
+        "fences, and do not write any text outside the XML root.\n"
+        "A turn must contain exactly one <response> root with exactly one "
+        "<reflection> and exactly one <action> element. The action type must "
+        "be one of: pyautogui, wait, fail, done.\n\n"
+        "For a GUI code action, embed the full body inside a CDATA section:\n"
+        "<response>\n"
+        "  <reflection><![CDATA[short reflection]]></reflection>\n"
+        "  <action type=\"pyautogui\"><![CDATA[\n"
+        "import pyautogui\n"
+        "pyautogui.click(100, 200)\n"
+        "  ]]></action>\n"
+        "</response>\n\n"
+        "For special signals, use a self-closing empty action:\n"
+        "<response><reflection><![CDATA[short reflection]]></reflection><action type=\"wait\"/></response>\n"
+        "<response><reflection><![CDATA[short reflection]]></reflection><action type=\"fail\"/></response>\n"
+        "<response><reflection><![CDATA[short reflection]]></reflection><action type=\"done\"/></response>"
+    )
+    pyautogui_guidance = (
+        "Use pyautogui only to drive the target application's GUI with mouse "
+        "and keyboard operations. Infer pixel coordinates from the screenshot. "
+        "Do not call pyautogui.locateCenterOnScreen or pyautogui.screenshot; "
+        "the observation is supplied by the environment. Each action runs in a "
+        "fresh interpreter, so no Python state carries between steps."
+    )
+    gui_only = (
+        "Complete the task through the GUI. Do not fabricate the target "
+        "artifact directly with file I/O, shell commands, software APIs, CLI "
+        "converters, or helper scripts. Work that bypasses the application GUI "
+        "does not count even if the final artifact happens to match."
+    )
+    timeout = (
+        "Each pyautogui action is killed by the sandbox after roughly 100 "
+        "seconds. If the UI needs time to settle, emit <action type=\"wait\"/> "
+        "instead of a sleep-only action."
+    )
+    return _engiworld_join_prompt_sections(
+        "You operate a desktop computer. Each step you receive a screenshot of the screen and emit one action.",
+        envelope,
+        pyautogui_guidance,
+        gui_only,
+        timeout,
+        "RETURN ONLY THE XML DOCUMENT DESCRIBED ABOVE. NEVER RETURN MARKDOWN OR ANYTHING OUTSIDE THE XML.",
+    )
+
+
+def build_cli_prompt() -> str:
+    """System prompt for Engiworld eval-mode=cli."""
+    envelope = (
+        "Return exactly one XML document each time. Do not use Markdown code "
+        "fences, and do not write any text outside the XML root.\n"
+        "A turn may emit one or more <action> elements in order. Action type "
+        "must be one of: bash, python, readimg, wait, fail, done.\n\n"
+        "<response>\n"
+        "  <reflection><![CDATA[short reflection]]></reflection>\n"
+        "  <action type=\"bash\"><![CDATA[\n"
+        "ls /tmp\n"
+        "  ]]></action>\n"
+        "  <action type=\"python\"><![CDATA[\n"
+        "import subprocess\n"
+        "subprocess.run([\"echo\", \"hi\"], check=True)\n"
+        "  ]]></action>\n"
+        "  <action type=\"readimg\" path=\"/absolute/path/to/image.png\"/>\n"
+        "</response>\n\n"
+        "For wait, fail, or done, emit a single empty self-closing action with no other actions in the same response."
+    )
+    runtime = (
+        "Neither the shell nor the Python interpreter persists across actions "
+        "or turns. Use absolute paths or chain commands within a single action. "
+        "Stdout, stderr, return code, and requested images appear in the next observation."
+    )
+    timeout = (
+        "Each action is killed by the sandbox after roughly 100 seconds. For "
+        "long-running operations, detach the work and poll progress in later "
+        "turns; use <action type=\"wait\"/> to let time pass."
+    )
+    return _engiworld_join_prompt_sections(
+        "You operate an Ubuntu computer through bash and python.",
+        envelope,
+        runtime,
+        timeout,
+        "My computer's password is '{CLIENT_PASSWORD}', feel free to use it when you need sudo rights.",
+        "RETURN ONLY THE XML DOCUMENT DESCRIBED ABOVE. NEVER RETURN MARKDOWN OR ANYTHING OUTSIDE THE XML.",
+    )
+
+
 SYS_PROMPT_IN_SCREENSHOT_OUT_CODE = """
 You operate a desktop computer. Each step you receive a screenshot and emit one action.
 The `python` action runs arbitrary Python on the VM; use `pyautogui` to drive the mouse and keyboard.

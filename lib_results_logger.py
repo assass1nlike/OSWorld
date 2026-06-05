@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Thread-safe results logging for OSWorld evaluations.
 
-results.json layout (written under <result_dir>/<action_space>/<observation_type>/<model>/,
+results.json layout (written under <result_dir>/<eval_mode>/<model>/,
 alongside args.json)::
 
     {
@@ -114,25 +114,35 @@ crash point, so they'd skew the read of the failed-task distribution). The
 two buckets partition the successful tasks.
 """
 
-import fcntl
 import json
 import statistics
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
+
 
 def _model_results_dir(args: Any) -> Path:
-    """Resolve <result_dir>/<action_space>/<observation_type>/<model>/.
+    """Resolve <result_dir>/<eval_mode>/<model>/.
 
-    Falls back to <result_dir>/summary/ if the args don't carry the
-    action_space/observation_type/model triplet (defensive — every existing
-    OSWorld runner passes them, but keep the safety net).
+    Fail-fast: the runner is expected to pass eval_mode + model. No fallback —
+    a missing field is a programmer error, not a recoverable case (a silent
+    fallback once let writer and reader land on different paths and the bug
+    sat for weeks).
     """
-    base = Path(args.result_dir)
-    if all(getattr(args, a, None) for a in ("action_space", "observation_type", "model")):
-        return base / args.action_space / args.observation_type / args.model
-    return base / "summary"
+    eval_mode = getattr(args, "eval_mode", None)
+    model = getattr(args, "model", None)
+    if not eval_mode or not model:
+        raise ValueError(
+            "_model_results_dir requires args.eval_mode and args.model; "
+            f"got eval_mode={eval_mode!r}, model={model!r}"
+        )
+    return Path(args.result_dir) / eval_mode / model
 
 
 def _results_file(args: Any) -> Path:
@@ -360,9 +370,22 @@ def _count_actions_from_traj(result_dir: Union[str, Path]) -> Optional[Dict[str,
                     # empty list is a valid "no readimg this step" signal.
                     counts["readimg"] += len(obj.get("readimg") or [])
                     continue
-                # GUI mode.
+                # GUI mode. PromptAgent writes ``action`` as
+                # ``{"kind": "WAIT"|"DONE"|"FAIL"|"pyautogui", "code": ...}``
+                # (lib_run_single.py:477). Older runners may still emit a bare
+                # string — keep that branch for backwards compatibility.
                 action = obj.get("action")
-                if isinstance(action, str):
+                if isinstance(action, dict):
+                    kind = action.get("kind")
+                    if kind == "WAIT":
+                        counts["wait"] += 1
+                    elif kind == "DONE":
+                        counts["done"] += 1
+                    elif kind == "FAIL":
+                        counts["fail"] += 1
+                    elif kind == "pyautogui":
+                        counts["python"] += 1
+                elif isinstance(action, str):
                     s = action.strip()
                     if s == "WAIT":
                         counts["wait"] += 1
@@ -371,9 +394,6 @@ def _count_actions_from_traj(result_dir: Union[str, Path]) -> Optional[Dict[str,
                     elif s == "FAIL":
                         counts["fail"] += 1
                     else:
-                        # Anything else is python (pyautogui code, time.sleep
-                        # follow-ups, etc. — pretty much by construction in
-                        # PromptAgent).
                         counts["python"] += 1
                 info = obj.get("info")
                 if isinstance(info, dict) and info.get("hard_timeout"):
@@ -676,13 +696,25 @@ def _with_lock(path: Path, mutate):
     # would invalidate any lock held on the old inode.
     lock_path = path.parent / ("." + path.name + ".lock")
     with open(lock_path, "a+") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        else:
+            lock.seek(0, 2)
+            if lock.tell() == 0:
+                lock.write("0")
+                lock.flush()
+            lock.seek(0)
+            msvcrt.locking(lock.fileno(), msvcrt.LK_LOCK, 1)
         try:
             doc = _read_doc(path)
             new_doc = mutate(doc)
             _write_doc(path, new_doc)
         finally:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            if fcntl is not None:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+            else:
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 # -------- public API ----------------------------------------------------
