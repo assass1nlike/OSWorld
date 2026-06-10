@@ -71,7 +71,7 @@ def add_common_engiworld_args(parser: argparse.ArgumentParser) -> None:
         help="每执行完一条 pyautogui action 后等几秒让 UI 稳定再截下一帧（CAD 卡顿建议 1~3）",
     )
     parser.add_argument(
-        "--max_steps", type=int, default=50,
+        "--max_steps", type=int, default=200,
         help="单个 task 最多允许的 agent step 数（一个 step = 推理一次 + 执行其产生的 action 列表）；超出即判失败",
     )
     parser.add_argument(
@@ -148,7 +148,7 @@ def add_common_engiworld_args(parser: argparse.ArgumentParser) -> None:
              "和 server 端账号配额计数一致（含被拒绝的请求）",
     )
     parser.add_argument(
-        "--bash_timeout", type=int, default=30,
+        "--bash_timeout", type=int, default=120,
         help="单个 ```bash``` 块（typed-action <action type=\"bash\"> 或 terminal obs 的 bash action）"
              "在 VM 上的超时秒数；超时由 server 侧 kill 并抛 SandboxExecuteHardTimeoutError。"
              "CAD/FEM/编译类任务建议调高到 120+。pyautogui / python action 的 30s 上限在服务端写死，"

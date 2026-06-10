@@ -24,6 +24,29 @@ logger = logging.getLogger("desktopenv.experiment")
 # acting as a natural delay between actions.
 
 _RESUME_SLEEP_SECONDS = 60
+_WAIT_SECONDS_MIN = 0.5
+_WAIT_SECONDS_MAX = 60.0
+
+
+def _resolve_wait_seconds(value, default):
+    if value is None or value == "":
+        try:
+            return max(0.0, float(default or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        try:
+            return max(0.0, float(default or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+    if seconds != seconds or seconds in (float("inf"), float("-inf")):
+        try:
+            return max(0.0, float(default or 0.0))
+        except (TypeError, ValueError):
+            return 0.0
+    return min(max(seconds, _WAIT_SECONDS_MIN), _WAIT_SECONDS_MAX)
 
 
 def _read_traj_for_resume(example_result_dir):
@@ -93,8 +116,10 @@ def _read_traj_for_resume(example_result_dir):
             "info": last.get("info") or {},
             "parse_error": last.get("parse_error"),
             "bash_runs": last.get("bash_runs"),
+            "python_runs": last.get("python_runs"),
             "readimg": last.get("readimg"),
             "terminal_signal": last.get("terminal_signal"),
+            "terminal_signal_seconds": last.get("terminal_signal_seconds"),
             "done": bool(last.get("done", False)),
         })
     return out
@@ -204,7 +229,7 @@ def _replay_cli_steps(env, agent, groups, sleep_seconds, bash_timeout):
     through ``env.controller.get_file``. WAIT/DONE/FAIL are folded into the
     trailing ``terminal_signal`` for the group.
     """
-    obs_input = {"bash_runs": [], "images": []}
+    obs_input = {"bash_runs": [], "python_runs": [], "images": []}
     done = False
     completed = 0
     for grp in groups:
@@ -212,6 +237,7 @@ def _replay_cli_steps(env, agent, groups, sleep_seconds, bash_timeout):
         # to the obs that fed predict() at step k+1.
         agent.observations.append({
             "bash_runs": obs_input["bash_runs"],
+            "python_runs": obs_input.get("python_runs", []),
             "images_paths": [p for (p, _data) in obs_input["images"]],
         })
         agent.thoughts.append(grp["response"])
@@ -224,6 +250,7 @@ def _replay_cli_steps(env, agent, groups, sleep_seconds, bash_timeout):
         agent.actions.append([tuple(a) for a in grp["actions"]])
 
         bash_runs = []
+        python_runs = []
         next_images = []  # [(path, bytes_or_empty), ...] — input shape
         for kind, code in grp["actions"]:
             if kind == "bash":
@@ -244,6 +271,24 @@ def _replay_cli_steps(env, agent, groups, sleep_seconds, bash_timeout):
                     "returncode": result.get("returncode", -1),
                     "timestamp": ts,
                 })
+            elif kind == "python":
+                ts = datetime.datetime.now().strftime("%Y%m%d@%H%M%S%f")
+                try:
+                    result = env.controller.run_python_script(code)
+                except SandboxExecuteHardTimeoutError as exc:
+                    logger.warning("[resume] cli python hit budget cap: %s", exc)
+                    result = {"output": "", "error": str(exc), "returncode": -1}
+                except Exception as exc:
+                    logger.warning("[resume] cli python failed: %s", exc)
+                    result = {"output": "", "error": f"[run_python_script raised: {exc}]",
+                              "returncode": -1}
+                python_runs.append({
+                    "command": code,
+                    "stdout": result.get("output") or "",
+                    "stderr": result.get("error") or "",
+                    "returncode": result.get("returncode", result.get("return_code", -1)),
+                    "timestamp": ts,
+                })
             elif kind == "readimg":
                 try:
                     data = env.controller.get_file(code)
@@ -258,14 +303,19 @@ def _replay_cli_steps(env, agent, groups, sleep_seconds, bash_timeout):
                 # Defer to the trailing terminal_signal handling below.
                 pass
             # Other kinds (shouldn't appear in CLI mode) are ignored.
-            time.sleep(sleep_seconds)
+            if kind != "WAIT":
+                time.sleep(sleep_seconds)
 
         sig = grp.get("terminal_signal")
         if sig in ("DONE", "FAIL"):
             done = True
-        # WAIT signal: the per-action sleep above already covers it.
+        elif sig == "WAIT":
+            time.sleep(_resolve_wait_seconds(
+                grp.get("terminal_signal_seconds"),
+                sleep_seconds,
+            ))
 
-        obs_input = {"bash_runs": bash_runs, "images": next_images}
+        obs_input = {"bash_runs": bash_runs, "python_runs": python_runs, "images": next_images}
         completed += 1
         if done:
             break
@@ -572,16 +622,6 @@ def run_single_example_terminal(agent, env, example, max_steps, instruction, arg
     """
     runtime_logger = setup_logger(example, example_result_dir)
 
-    if str(example.get("id", "")).endswith("-windows"):
-        logger.warning(
-            "Terminal mode does not support windows tasks; skipping %s",
-            example.get("id"),
-        )
-        with open(os.path.join(example_result_dir, "result.txt"), "w", encoding="utf-8") as f:
-            f.write("0.0\n")
-        log_task_completion(example, 0.0, example_result_dir, args)
-        return
-
     env.reset(task_config=example)
     try:
         agent.reset(runtime_logger, vm_ip=env.vm_ip)
@@ -590,7 +630,7 @@ def run_single_example_terminal(agent, env, example, max_steps, instruction, arg
 
     time.sleep(180)  # Same boot wait as the GUI runner — snapshot revert + VM ready.
 
-    obs = {"bash_runs": [], "images": []}
+    obs = {"bash_runs": [], "python_runs": [], "images": []}
     done = False
     step_idx = 0
     bash_timeout = getattr(args, "bash_timeout", _BASH_TIMEOUT_DEFAULT)
@@ -642,7 +682,7 @@ def run_single_example_terminal(agent, env, example, max_steps, instruction, arg
                 except Exception:
                     agent.reset(vm_ip=env.vm_ip)
                 time.sleep(180)
-                obs = {"bash_runs": [], "images": []}
+                obs = {"bash_runs": [], "python_runs": [], "images": []}
                 done = False
                 step_idx = 0
                 if getattr(args, "record_video", False):
@@ -669,19 +709,28 @@ def run_single_example_terminal(agent, env, example, max_steps, instruction, arg
                     f.write(user_text)
 
         actions = actions or []
-        bash_blocks = [p for k, p in actions if k == "bash"]
+        command_blocks = [(k, p) for k, p in actions if k in ("bash", "python")]
         readimg_paths = [p for k, p in actions if k == "readimg"]
-        signals = [k for k, _ in actions if k in ("WAIT", "DONE", "FAIL")]
-        terminal_signal = signals[0] if signals else None
+        signal_entries = [(k, p) for k, p in actions if k in ("WAIT", "DONE", "FAIL")]
+        terminal_signal, terminal_signal_payload = signal_entries[0] if signal_entries else (None, None)
+        terminal_signal_seconds = (
+            _resolve_wait_seconds(terminal_signal_payload, args.sleep_after_execution or 2)
+            if terminal_signal == "WAIT"
+            else None
+        )
 
-        # 1) Run bash blocks in order, capture each result.
+        # 1) Run command blocks in order, capture each result.
         bash_runs = []
-        for i, script in enumerate(bash_blocks):
+        python_runs = []
+        for i, (kind, script) in enumerate(command_blocks):
             ts = datetime.datetime.now().strftime("%Y%m%d@%H%M%S%f")
             first_line = (script.splitlines() or [""])[0][:120]
-            logger.info("Step %d bash[%d]: %s", step_idx + 1, i + 1, first_line)
+            logger.info("Step %d %s[%d]: %s", step_idx + 1, kind, i + 1, first_line)
             try:
-                result = env.controller.run_bash_script(script, timeout=bash_timeout)
+                if kind == "bash":
+                    result = env.controller.run_bash_script(script, timeout=bash_timeout)
+                else:
+                    result = env.controller.run_python_script(script)
             except SandboxExecuteHardTimeoutError as exc:
                 # Sandbox killed our command for exceeding the per-action
                 # budget (~100s, system-prompted to the model). Surface this
@@ -693,11 +742,11 @@ def run_single_example_terminal(agent, env, example, max_steps, instruction, arg
                 # the command spawned may still be running on the VM — the
                 # message below points the model at pkill/pgrep if a clean
                 # state is required before retrying.
-                logger.warning("run_bash_script hit per-action budget cap: %s", exc)
+                logger.warning("run_%s_script hit per-action budget cap: %s", kind, exc)
                 result = {
                     "output": "",
                     "error": (
-                        "[bash action killed by sandbox: exceeded ~100s "
+                        f"[{kind} action killed by sandbox: exceeded 120s "
                         "per-action wall-clock budget]\n"
                         "Only the immediate child was terminated; any "
                         "grandchild processes the command spawned may still "
@@ -710,17 +759,21 @@ def run_single_example_terminal(agent, env, example, max_steps, instruction, arg
                     "returncode": -1,
                 }
             except Exception as exc:
-                logger.error("run_bash_script failed: %s", exc)
-                result = {"output": "", "error": f"[run_bash_script raised: {exc}]", "returncode": -1}
+                logger.error("run_%s_script failed: %s", kind, exc)
+                result = {"output": "", "error": f"[run_{kind}_script raised: {exc}]", "returncode": -1}
             stdout_full = result.get("output") or ""
             stderr_full = result.get("error") or ""
-            bash_runs.append({
+            run_row = {
                 "command": script,
                 "stdout": _truncate(stdout_full, _TERMINAL_OUTPUT_CAP),
                 "stderr": _truncate(stderr_full, _TERMINAL_OUTPUT_CAP),
-                "returncode": result.get("returncode", -1),
+                "returncode": result.get("returncode", result.get("return_code", -1)),
                 "timestamp": ts,
-            })
+            }
+            if kind == "bash":
+                bash_runs.append(run_row)
+            else:
+                python_runs.append(run_row)
 
         # 2) Resolve readimg paths (after bash, so a freshly-written file is fetchable).
         next_images = []
@@ -746,7 +799,7 @@ def run_single_example_terminal(agent, env, example, max_steps, instruction, arg
 
         # 3) Apply terminal signal.
         if terminal_signal == "WAIT":
-            time.sleep(args.sleep_after_execution or 2)
+            time.sleep(terminal_signal_seconds)
         elif terminal_signal in ("DONE", "FAIL"):
             done = True
 
@@ -756,9 +809,11 @@ def run_single_example_terminal(agent, env, example, max_steps, instruction, arg
                 "step_num": step_idx + 1,
                 "response": response,
                 "bash_runs": bash_runs,
+                "python_runs": python_runs,
                 "readimg": [{"path": p, "ok": isinstance(d, (bytes, bytearray)) and bool(d)}
                             for p, d in next_images],
                 "terminal_signal": terminal_signal,
+                "terminal_signal_seconds": terminal_signal_seconds,
                 "done": done,
             }, ensure_ascii=False))
             f.write("\n")
@@ -769,6 +824,15 @@ def run_single_example_terminal(agent, env, example, max_steps, instruction, arg
                 encoding="utf-8",
             ) as f:
                 f.write(f"$ {r['command']}\n[returncode={r['returncode']}]\n")
+                f.write(f"[stdout]\n{r['stdout']}\n")
+                f.write(f"[stderr]\n{r['stderr']}\n")
+        for i, r in enumerate(python_runs):
+            with open(
+                os.path.join(example_result_dir, f"step_{step_idx + 1}_python_{i + 1}_{r['timestamp']}.txt"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                f.write(f"$ python\n{r['command']}\n[returncode={r['returncode']}]\n")
                 f.write(f"[stdout]\n{r['stdout']}\n")
                 f.write(f"[stderr]\n{r['stderr']}\n")
         for i, (path, data) in enumerate(next_images):
@@ -782,13 +846,13 @@ def run_single_example_terminal(agent, env, example, max_steps, instruction, arg
                 f.write(data)
 
         # 5) Build next obs and advance.
-        obs = {"bash_runs": bash_runs, "images": next_images}
+        obs = {"bash_runs": bash_runs, "python_runs": python_runs, "images": next_images}
 
         if done:
             logger.info("Episode done (signal=%s).", terminal_signal)
             break
 
-        if not bash_runs and not next_images and terminal_signal is None:
+        if not bash_runs and not python_runs and not next_images and terminal_signal is None:
             logger.warning(
                 "Step %d: model produced no actionable blocks; advancing anyway.",
                 step_idx + 1,

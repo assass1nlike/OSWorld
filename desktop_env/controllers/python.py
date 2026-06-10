@@ -364,6 +364,7 @@ class PythonController:
                 headers={'Content-Type': 'application/json'},
                 data=payload, timeout=600,
             )
+            _raise_if_execute_hard_timeout(response, "run_python_script")
             if response.status_code != 200:
                 raise RuntimeError(
                     f"HTTP {response.status_code}: {response.text}"

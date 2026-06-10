@@ -36,7 +36,9 @@ _PYTHON_GUIDANCE = (
 
 _BASH_GUIDANCE = (
     "=== <action type=\"bash\"> ===\n"
-    "Use this type to run a bash script on the VM. The shell does NOT persist across actions or turns: cwd, "
+    "Use this type to run a bash script on the VM when bash is available. On Windows VMs, prefer `python` "
+    "with `subprocess` to invoke PowerShell/CMD or application CLIs if bash-specific syntax is unavailable. "
+    "The shell does NOT persist across actions or turns: cwd, "
     "exported variables and the `jobs` table reset every bash action, so use absolute paths or chain commands "
     "with `&&` within a single action. Stdout / stderr / returncode appear in the next observation's runtime feedback."
 )
@@ -164,11 +166,12 @@ def build_gui_prompt() -> str:
 def build_cli_prompt() -> str:
     """System prompt for `--eval-mode cli`: terminal stdout obs + bash / python / readimg."""
     return _join_sections(
-        "You operate an Ubuntu computer through `bash` and `python`. Each step you receive the previous turn's "
+        "You operate the task VM through `bash` and `python` actions. The VM may be Ubuntu or Windows. "
+        "Each step you receive the previous turn's "
         "terminal output (stdout / stderr / returncode) plus any images you requested via `readimg`, and emit one or "
         "more actions.\n"
-        "Neither the shell nor the Python interpreter persists across actions or turns: cwd, exported variables, the "
-        "`jobs` table and all Python state reset every action. Use absolute paths or chain commands with `&&` within "
+        "Neither the shell nor the Python interpreter persists across actions or turns: cwd, exported variables, shell "
+        "job tables and all Python state reset every action. Use absolute paths or chain commands within "
         "a single action. No state carries between steps.",
         _CLI_ENVELOPE,
         _BASH_GUIDANCE,

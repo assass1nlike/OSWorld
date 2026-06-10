@@ -134,12 +134,25 @@ def _strip_log_metadata(messages):
                 src.pop("_step", None)
 
 
-def _format_terminal_text(bash_runs, image_paths):
-    if not bash_runs and not image_paths:
+def _format_terminal_text(bash_runs, image_paths, python_runs=None):
+    python_runs = python_runs or []
+    if not bash_runs and not python_runs and not image_paths:
         return "Terminal observation: no commands have been executed yet."
     parts = []
     for r in bash_runs:
         parts.append("$ " + (r.get("command") or "").rstrip())
+        out = (r.get("stdout") or "").rstrip()
+        err = (r.get("stderr") or "").rstrip()
+        if out:
+            parts.append(out)
+        if err:
+            parts.append("[stderr]\n" + err)
+        parts.append("[returncode=%s]" % r.get("returncode"))
+    for r in python_runs:
+        parts.append("$ python")
+        code = (r.get("command") or "").rstrip()
+        if code:
+            parts.append(code)
         out = (r.get("stdout") or "").rstrip()
         err = (r.get("stderr") or "").rstrip()
         if out:
@@ -656,6 +669,7 @@ class PromptAgent:
                 text = _format_terminal_text(
                     previous_obs.get("bash_runs", []),
                     previous_obs.get("images_paths", []),
+                    previous_obs.get("python_runs", []),
                 )
                 messages.append({
                     "role": "user",
@@ -701,9 +715,11 @@ class PromptAgent:
             })
         elif self.eval_mode == "cli":
             bash_runs = obs.get("bash_runs") or []
+            python_runs = obs.get("python_runs") or []
             images = obs.get("images") or []
             self.observations.append({
                 "bash_runs": bash_runs,
+                "python_runs": python_runs,
                 # store paths only; image bytes are one-shot (model already saw them this turn)
                 "images_paths": [p for (p, _data) in images],
             })
@@ -711,7 +727,7 @@ class PromptAgent:
             _current_step = len(self.observations)
             content = [{
                 "type": "text",
-                "text": _format_terminal_text(bash_runs, [p for (p, _) in images]),
+                "text": _format_terminal_text(bash_runs, [p for (p, _) in images], python_runs),
             }]
             for path, data in images:
                 if not isinstance(data, (bytes, bytearray)) or not data:

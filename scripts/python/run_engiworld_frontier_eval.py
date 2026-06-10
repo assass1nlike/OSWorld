@@ -5,15 +5,15 @@ OleehyO/OSWorld's original instance creation path (``msh-sandbox``), while
 filling in the conventions used for Engiworld frontier-model runs:
 
 * eval mode defaults to OleehyO-style ``gui``;
-* ``max_steps`` defaults to 100;
+* ``max_steps`` defaults to 200;
 * ``max_tokens`` defaults to the vendor default and is omitted from the child
   command unless explicitly provided;
-* ``result_dir`` defaults to ``prompt_agent_maxstep100_maxtokendefault``;
+* ``result_dir`` defaults to ``prompt_agent_maxstep200_maxtokendefault``;
 * if no eval-list JSON is supplied, one is generated from task directories.
 
 The output directory layout follows the Engiworld runner:
 
-    prompt_agent_maxstep100_maxtokendefault/gui/gpt-5.5/eagle/task-01
+    prompt_agent_maxstep200_maxtokendefault/gui/gpt-5.5/eagle/task-01
 """
 from __future__ import annotations
 
@@ -161,7 +161,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--eval-mode", dest="eval_mode", default="gui", choices=["gui", "cli"])
     parser.add_argument("--result_dir", help="Result root. Defaults to prompt_agent_maxstep*_maxtoken*.")
     parser.add_argument("--num_envs", type=int, default=1)
-    parser.add_argument("--max_steps", type=int, default=100)
+    parser.add_argument("--max_steps", type=int, default=200)
     parser.add_argument("--max_trajectory_length", type=int, default=3)
     parser.add_argument("--max_tokens", type=int, default=None)
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -173,7 +173,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--screen_height", type=int, default=1080)
     parser.add_argument("--sleep_after_execution", type=float, default=1.0)
     parser.add_argument("--client_password", default="")
-    parser.add_argument("--bash_timeout", type=int, default=30)
+    parser.add_argument("--bash_timeout", type=int, default=120)
     parser.add_argument("--spec", default="g4il.2xlarge")
     parser.add_argument("--reasoning_effort", type=str, default="high", choices=["low", "medium", "high"])
     parser.add_argument("--resume", action="store_true")
