@@ -8,7 +8,7 @@ This script keeps the same per-task execution path as
 * provider defaults to OleehyO/OSWorld's original ``msh-sandbox``
 * max steps defaults to 200
 
-The only difference is the eval list: each split runs a curated set of 10
+The only difference is the eval list: each split runs a curated set of 3
 simple tasks instead of the full corpus.
 """
 from __future__ import annotations
@@ -33,29 +33,15 @@ from run_engiworld_all_frontier_eval import (
 )
 
 
-SIMPLE10_C: dict[str, list[str]] = {
+SIMPLE3_C: dict[str, list[str]] = {
     "altium-designer": ["task-01"],
     "blender": ["task-01"],
-    "brl-cad": ["task-01"],
-    "cadence-orcad": ["task-01"],
-    "calculix": ["task-01"],
     "eagle": ["task-01"],
-    "freecad": ["task-01"],
-    "freecad-path": ["task-01"],
-    "kicad": ["task-01"],
-    "openscad": ["task-01"],
 }
 
-SIMPLE10_V: dict[str, list[str]] = {
-    "altium-designer": ["task-01"],
+SIMPLE3_V: dict[str, list[str]] = {
     "blender": ["task-01"],
-    "cadence-orcad": ["task-01"],
     "eagle": ["task-01"],
-    "freecad": ["task-01"],
-    "freecad-path": ["task-01"],
-    "kicad": ["task-01"],
-    "librecad": ["task-01"],
-    "openscad": ["task-01"],
     "zbrush": ["task-01"],
 }
 
@@ -69,7 +55,7 @@ def _validate_meta(task_root: Path, meta: dict[str, list[str]]) -> None:
                 missing.append(str(task_json))
     if missing:
         raise FileNotFoundError(
-            "Simple10 eval list references missing task json(s):\n"
+            "Simple3 eval list references missing task json(s):\n"
             + "\n".join(missing)
         )
 
@@ -80,7 +66,7 @@ def _write_eval_list(
     meta: dict[str, list[str]],
     dry_run: bool,
 ) -> Path:
-    eval_list = (result_dir / "_eval_lists" / f"{split.label}_simple10.json").resolve()
+    eval_list = (result_dir / "_eval_lists" / f"{split.label}_simple3.json").resolve()
     if not dry_run:
         eval_list.parent.mkdir(parents=True, exist_ok=True)
         eval_list.write_text(
@@ -92,14 +78,14 @@ def _write_eval_list(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run 10 simple task-c and 10 simple task-v Engiworld evaluations.",
+        description="Run 3 simple task-c and 3 simple task-v Engiworld evaluations.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--engiworld_root", help="Engiworld repo root. Defaults to a sibling Engiworld checkout.")
     parser.add_argument("--model", required=True, help="Model id passed to PromptAgent, e.g. gpt-5.5.")
     parser.add_argument("--provider_name", default=DEFAULT_PROVIDER, choices=[DEFAULT_PROVIDER])
     parser.add_argument("--mode", choices=["both", "cli", "gui"], default="both")
-    parser.add_argument("--result_dir", help="Result root. Defaults to prompt_agent_simple10_maxstep*_maxtoken*.")
+    parser.add_argument("--result_dir", help="Result root. Defaults to prompt_agent_simple3_maxstep*_maxtoken*.")
     parser.add_argument("--num_envs", type=int, default=None, help="Concurrency for each split unless overridden.")
     parser.add_argument("--num_envs_c", type=int, default=None, help="Concurrency for task-c / cli.")
     parser.add_argument("--num_envs_v", type=int, default=None, help="Concurrency for task-v / gui.")
@@ -137,7 +123,7 @@ def main() -> int:
 
     engiworld_root = _resolve_engiworld_root(args.engiworld_root)
     default_dir = _default_result_dir(args.max_steps, args.max_tokens)
-    result_dir_name = "prompt_agent_simple10_" + default_dir.removeprefix("prompt_agent_")
+    result_dir_name = "prompt_agent_simple3_" + default_dir.removeprefix("prompt_agent_")
     result_dir = Path(args.result_dir or result_dir_name).resolve()
 
     per_split_default = args.num_envs if args.num_envs is not None else 1
@@ -145,19 +131,19 @@ def main() -> int:
     if args.mode in {"both", "cli"}:
         split_specs.append((
             SplitConfig("task-c", "task-c", "cli", args.num_envs_c or per_split_default),
-            SIMPLE10_C,
+            SIMPLE3_C,
         ))
     if args.mode in {"both", "gui"}:
         split_specs.append((
             SplitConfig("task-v", "task-v", "gui", args.num_envs_v or per_split_default),
-            SIMPLE10_V,
+            SIMPLE3_V,
         ))
 
-    print(f"[engiworld-simple10] engiworld_root={engiworld_root}")
-    print(f"[engiworld-simple10] result_dir={result_dir}")
-    print(f"[engiworld-simple10] model={args.model}")
-    print(f"[engiworld-simple10] provider_name={args.provider_name}")
-    print(f"[engiworld-simple10] prompt_runner={PROMPT_RUNNER}")
+    print(f"[engiworld-simple3] engiworld_root={engiworld_root}")
+    print(f"[engiworld-simple3] result_dir={result_dir}")
+    print(f"[engiworld-simple3] model={args.model}")
+    print(f"[engiworld-simple3] provider_name={args.provider_name}")
+    print(f"[engiworld-simple3] prompt_runner={PROMPT_RUNNER}")
 
     commands: list[tuple[SplitConfig, list[str]]] = []
     for split, meta in split_specs:
@@ -167,11 +153,11 @@ def main() -> int:
         cmd = _build_child_cmd(args, split, task_root, eval_list, result_dir)
         task_count = sum(len(v) for v in meta.values())
         print(
-            f"[engiworld-simple10] {split.label}: eval_mode={split.eval_mode}, "
+            f"[engiworld-simple3] {split.label}: eval_mode={split.eval_mode}, "
             f"domains={len(meta)}, tasks={task_count}, num_envs={split.num_envs}"
         )
-        print(f"[engiworld-simple10] {split.label} eval_list={eval_list}")
-        print(f"[engiworld-simple10] {split.label} command:")
+        print(f"[engiworld-simple3] {split.label} eval_list={eval_list}")
+        print(f"[engiworld-simple3] {split.label} command:")
         print(_quote_cmd(cmd))
         commands.append((replace(split), cmd))
 
@@ -192,8 +178,8 @@ def main() -> int:
                 stderr_path = logs_dir / f"{split.label}_stderr.log"
                 stdout_handle = stdout_path.open("w", encoding="utf-8", errors="replace")
                 stderr_handle = stderr_path.open("w", encoding="utf-8", errors="replace")
-                print(f"[engiworld-simple10] {split.label} stdout={stdout_path}")
-                print(f"[engiworld-simple10] {split.label} stderr={stderr_path}")
+                print(f"[engiworld-simple3] {split.label} stdout={stdout_path}")
+                print(f"[engiworld-simple3] {split.label} stderr={stderr_path}")
                 proc = subprocess.Popen(
                     cmd,
                     cwd=REPO_ROOT,
@@ -206,7 +192,7 @@ def main() -> int:
         exit_codes: dict[str, int] = {}
         for split, proc, _stdout_handle, _stderr_handle in processes:
             exit_codes[split.label] = proc.wait()
-            print(f"[engiworld-simple10] {split.label} exited with code {exit_codes[split.label]}")
+            print(f"[engiworld-simple3] {split.label} exited with code {exit_codes[split.label]}")
         return 0 if all(code == 0 for code in exit_codes.values()) else 1
     finally:
         for _split, _proc, stdout_handle, stderr_handle in processes:
